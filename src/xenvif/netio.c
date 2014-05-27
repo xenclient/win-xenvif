@@ -37,6 +37,9 @@
 #include "netio.h"
 #include "dbg_print.h"
 #include "assert.h"
+#include "mutex.h"
+
+static  MUTEX   NetioMutex;
 
 LONG    NetioReferences;
 PVOID   NetioGetUnicastIpAddressTable;
@@ -151,6 +154,14 @@ fail1:
 #undef  MK_PTR
 }
 
+VOID
+NetioInitializeMutex(
+    VOID
+    )
+{
+    InitializeMutex(&NetioMutex);
+}
+
 NTSTATUS
 NetioInitialize(
     VOID
@@ -162,6 +173,8 @@ NetioInitialize(
     PAUX_MODULE_EXTENDED_INFO   QueryInfo;
     ULONG                       Index;
     NTSTATUS                    status;
+
+    AcquireMutex(&NetioMutex);
 
     References = InterlockedIncrement(&NetioReferences);
 
@@ -180,6 +193,7 @@ NetioInitialize(
     if (BufferSize == 0)
         goto fail2;
 
+again:
     Count = BufferSize / sizeof (AUX_MODULE_EXTENDED_INFO);
     QueryInfo = __NetioAllocate(sizeof (AUX_MODULE_EXTENDED_INFO) * Count);
 
@@ -190,8 +204,13 @@ NetioInitialize(
     status = AuxKlibQueryModuleInformation(&BufferSize,
                                            sizeof (AUX_MODULE_EXTENDED_INFO),
                                            QueryInfo);
-    if (!NT_SUCCESS(status))
-        goto fail4;
+    if (!NT_SUCCESS(status)) {
+        if (status != STATUS_BUFFER_TOO_SMALL)
+            goto fail4;
+
+        __NetioFree(QueryInfo);
+        goto again;
+    }
 
     for (Index = 0; Index < Count; Index++) {
         PCHAR   Name;
@@ -211,11 +230,15 @@ found:
     if (!NT_SUCCESS(status))
         goto fail6;
 
+    __NetioFree(QueryInfo);
+
 done:
     ASSERT(NetioGetUnicastIpAddressTable != NULL);
     ASSERT(NetioNotifyUnicastIpAddressChange != NULL);
     ASSERT(NetioCancelMibChangeNotify2 != NULL);
     ASSERT(NetioFreeMibTable != NULL);
+
+    ReleaseMutex(&NetioMutex);
 
     return STATUS_SUCCESS;
 
@@ -240,6 +263,7 @@ fail1:
     Error("fail1 (%08x)\n", status);
 
     (VOID) InterlockedDecrement(&NetioReferences);
+    ReleaseMutex(&NetioMutex);
 
     return status;
 }
